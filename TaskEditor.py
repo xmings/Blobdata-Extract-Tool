@@ -8,7 +8,7 @@ class TaskEditor(QtGui.QWidget):
     def __init__(self, parent=None, flags=0):
         super(TaskEditor, self).__init__(parent=None)
         self.setWindowTitle(u"BLOB Data Extract Tool")
-        self.setWindowIcon(QtGui.QIcon('./beng1.ico'))
+        self.setWindowIcon(QtGui.QIcon('./blobdata_pump.ico'))
         self.globalLayout = QtGui.QGridLayout()
         self.setLayout(self.globalLayout)
         self.setMinimumSize(500, 700)
