@@ -1,5 +1,6 @@
+#-*- coding:utf-8 -*-
 import os, sys, time
-import datetime, re
+import datetime, re, cx_Oracle
 from configparser import ConfigParser, Error, RawConfigParser
 
 _CONFIG_FILE = 'config.ini'
@@ -20,7 +21,7 @@ class ParaPrase(object):
             cls.paraprase = config
             return cls.paraprase
         except Error:
-            print("参数文件配置有误!!!")
+            print(u"参数文件配置有误!!!")
                     
     @staticmethod    
     def get_spliter(t):
@@ -65,19 +66,7 @@ class ParaPrase(object):
         conf = ParaPrase.get()
         conf.set(section, key, value)
         conf.write(open(_CONFIG_FILE, 'w'))    
-        
-
-class WriteFile(object):
-    def __init__(self, iopath):
-        self.iopath = iopath
-    
-    def writepic(self, filename, data, t='txt'):
-        writemode = 'w' if t == 'txt' else 'wb'
-        filepath = os.path.join(self.iopath, filename)
-        with open(filepath, writemode) as file:
-            file.write(data)
-            
-          
+                      
 
 class ReadFile(object):
     def __init__(self, iopath):
@@ -96,36 +85,84 @@ class ReadFile(object):
             self.fid += 1
                 
             yield [self.fid, prepicname, self.data]
-            
-
-class WriteLog(object):
-    pass
-
 
 
 class ToolBox(object):
     def __init__(self):
         pass
-    @staticmethod
-    def get_sqluldr(parent):
-        files = [ 'sqluldr2.lib','sqluldr2.dll','sqluldr2.exe' ]  #必备文件
-        
-        for filename in files:
-            if not os.path.exists(os.path.join(PRO_DIR, filename)):
-                parent.displaylog("sqluldr模块不完整")
-                raise Exception("sqluldr模块不完整")
-        return os.path.join(PRO_DIR, 'sqluldr2.exe')
     
     @staticmethod
-    def recordnumber(file, num):
+    def recordNumber(file, num):
         with open(file, 'a') as f:
             text = str(num) + ' rows exported at ' + time.strftime('%Y-%m-%d %H:%M:%S',time.localtime()) + '\n'
-            f.write(text)        
+            f.write(text)
+    
+    @staticmethod        
+    def formartImageName(strs):
+        strs = str(strs)
+        while strs.find('*')>0 and not strs.endswith('*'):
+            strs = strs.replace('*','×')
+    
+        strs = strs.replace('*','').replace('@','').replace('<','').replace('>','')\
+            .replace('/','').replace('?','').replace('|','').replace('"','')\
+               .replace('\r','').replace('\t','').replace('\n','').replace(' ','')
+    
+        return strs if strs else ''
+    
+    @staticmethod
+    def getFileCount(filePath, logFileName):
+        lineCount = 0
+        for f in os.listdir(filePath):
+            if logFileName.split('N')[0] in f:
+                logFile = os.path.join(filePath, f) 
+                winCmd = "type " + logFile + "|find /c /v \"\""
+                lineCount += int(os.popen(winCmd).readline().replace('\n',''))
+        return lineCount
+    
+    @staticmethod
+    def createDir(filePath, dirCount):
+        subDirCount = 0
+        for i in range(dirCount):
+            subDir = os.path.join(filePath, str(i+1))
+            if os.path.exists(subDir) and os.path.isdir(subDir):
+                continue
+            os.mkdir(subDir)
+            
+    @staticmethod
+    def genImageName(infoList, infoIndexList, imageNameSpliter):
+        imageName = ''
+        ind = 0
+        for i in infoIndexList:
+            if i == -1:
+                continue
+            index = infoIndexList.index(ind)
+            imageName += infoList[index] + imageNameSpliter
+            ind += 1
+        return imageName.rstrip(imageNameSpliter)
+    
+    @staticmethod
+    def genColumnValueStr(infoList, infoIndexList):
+        columnValueStr = ""
+        ind = 0
+        for i in infoIndexList:
+            if i == -1:
+                continue
+            index = infoIndexList.index(ind)
+            if isinstance(infoList[index], cx_Oracle.LOB):
+                columnValueStr += ":blobData" + ","
+            elif isinstance(infoList[index], str):
+                columnValueStr += "'" + infoList[index] + "',"
+            elif isinstance(infoList[index], [int,long,float,complex]):
+                columnValueStr += str(infoList[index]) + ","
+            else:
+                print(infoList[index], type(infoList[index]))
+            
+            ind += 1
+        return columnValueStr.rstrip(',')        
         
-
-class DBIOException(Exception):
-    def __init__(self, args):
-        self.args = args
+            
+    
+        
         
 
 if __name__ == '__main__':

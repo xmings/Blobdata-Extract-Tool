@@ -1,139 +1,285 @@
-import model, os, cx_Oracle
-import tkinter as TK
-from util import ParaPrase
-from dataio import DBExport as DataExport
-from dataio import DBImport as DataImport
-from picio import DBExport as PicExport
-from picio import DBImport as PicImport
+# -*- coding: utf-8 -*-
+import re, cx_Oracle
+from DBConn import DBConnection
+from Util import ToolBox
+from Blob2OS import Blob2OS
+from Blob2DB import Blob2DB, DBWriter
+from multiprocessing import Process, Pool, Queue, cpu_count
 
+class Control(object):
+	def __init__(self):
+		self.sourceDBConnStr = ''
+		self.targetDBConnStr = ''
+		self.blobIdSQL = ''
+		self.blobSQL = ''
+		self.targetTable = ''
+	
+	def getDBConnStatus(self, dbConnStr, t = 'sourceDB'):
+		result = ''
+		with DBConnection(dbConnStr) as db:
+			result = db.openConnection()
+		
+		if  t == 'sourceDB':
+			self.sourceDBConnStr = dbConnStr
+		else:
+			self.targetDBConnStr = dbConnStr
+			
+		return result
+	
+	def getSourceTableColumnName(self, blobIdSQL, blobSQL):
+		self.columnNameList = []
+		if blobIdSQL:
+			p1 = re.split('from', blobIdSQL, flags = re.I)[0]
+			p1 = re.sub('select', '', p1, count = 1, flags = re.I).strip(' ').split(',')
+			for p2 in p1:
+				p3 = re.split(' |as', p2, flags = re.I)
+				if not p3:
+					continue
+				p3 = 'SQL1.' + p3[-1]
+				self.columnNameList.append(p3)
+			self.blobIdSQL = blobIdSQL
+			
+		if blobSQL:
+			p1 = re.split('from', blobSQL, flags = re.I)[0]
+			p1 = re.sub('select', '', p1, count = 1, flags = re.I).strip(' ').split(',')
+			for p2 in p1:
+				p3 = re.split(' |as', p2, flags = re.I)
+				if not p3:
+					continue			
+				p3 = 'SQL2.' + p3[-1]
+				self.columnNameList.append(p3)
+			self.blobSQL = blobSQL	
+		
+		return self.columnNameList
+			
+	
+	def getTargetTableColumn(self, tableName):
+		self.targetTable = tableName
+		tableColumn = []
+		with DBConnection(self.targetDBConnStr) as db:
+			cursor = db.openConnection()
+			if cursor:
+				cursor.execute("select * from " + tableName)
+				tableColumn = [i[0] + ' ' + str(i[1]).replace("type 'cx_Oracle.", "")\
+				               .replace("'", "") for i in cursor.description]
+		return tableColumn
+		
+	
+	def genFetchBlobSQL(self, blobIdColumn, blobColumn, blobNameColumnList, blobNameSpliter):
+		tableName = []
+		blobIdColumn
+		tableName.append(self.getTableNameAndColumnName(blobIdColumn)[0])
+		for i in blobNameColumnList:
+			table = self.getTableNameAndColumnName(blobIdColumn)[0]
+			if tableName.count(table) == 0:
+				tableName.append(table)
+		
+		if len(tableName) == 1:
+			blobIdSQLStr = "Select base." + self.getTableNameAndColumnName(blobIdColumn)[1] + " , " \
+					    + ",".join([" base." + self.getTableNameAndColumnName(i)[1] for i in blobNameColumnList]) \
+			            + " From " + tableName[0] + " base"
+			blobSQLStr = "Select blob." + self.getTableNameAndColumnName(blobColumn)[1] + " from " + tableName[0]	+ " blob where "		
+		elif len(tableName) >= 2:
+			blobTableName,blobColumn = self.getTableNameAndColumnName(blobColumn)
+			
+		else:
+			pass
+		
+		
+		
+		if len(tableName) == 1:
+			pass
+		else:
+			blobTable = blobColumn.split('.')[0]
+			blobColumn = blobColumn.split('.')[1]
+			baseTable = tableName.pop(blobTable)[0]
+			
+		return blobIdSQLStr, blobSQLStr
+	
+	def getTableNameAndColumnName(self, tableColumn):
+		owner, table, column = tableColumn.split('.') \
+		    if tableColumn.count('.') == 2 else ['', ] + tableColumn.split('.')
+		tableName = owner + '.' + table if owner else table
+		
+		return tableName, column
+	
+	
+	def runTask(self, t = 'Blob2IO', processes = 6, *args):
+		print("goo.....")		
+		# 开启一个全局的对列，用于下面存放图片ROWID 
+		imgQueue = Queue()
+		blob2OS = Blob2OS(processes = processes, *args) \
+		    if t == 'Blob2IO' else Blob2DB(processes = processes, *args)
+		allProcesses = []
+		
+		if processes == 0:
+			processes = cpu_count()
+	
+		master = Process(target=blob2OS.master,args=(imgQueue,))
+		master.start()
+		allProcesses.append(master)
+		
+		if t == 'Blob2IO':
+			recQueue = Queue()
+			record = Process(target=blob2OS.recordBlobId,args=(recQueue,))
+			record.start()
+			allProcesses.append(record)			
 
-class MainControl(object):
-    
-    def __init__(self, parent):
-        self.parent = parent
-    
-    def exec_programe(self, event):        
-        if not self.parent.dbconn_str.get() or not self.parent.nlslang_str.get() or not self.parent.iopath_label['text']:
-            return self.displaylog('请填写所有选项！！')
-            
-        self.dbconn_str = self.parent.dbconn_str.get()
-        self.nlslang_str = self.parent.nlslang_str.get()
-        self.iopath_str = self.parent.iopath_label['text']
-        os.environ['NLS_LANG'] = self.nlslang_str
-        self.datafile = os.path.join(self.iopath_str, 'datafile.txt')
-        self.logfile = os.path.join(self.iopath_str, 'logfile.log')
-        self.ctlfile = os.path.join(self.iopath_str, 'controlfile.txt')
-        
+			for i in range(processes):
+				slave = Process(target=blob2OS.slave,args=(imgQueue, recQueue,))
+				slave.start()
+				allProcesses.append(slave)
+		else:
+			for i in range(processes):
+				slave = Process(target=blob2OS.slave,args=(imgQueue,))
+				slave.start()
+				allProcesses.append(slave)
+				
+	
+		for slave in allProcesses:
+			slave.join()
+	
+		print("end.....")		
+	
+	
+	def runBlob2IO(self, blobNameSpliter, blobNameColumn, filePath, processes):
+		self.blobNameColumnIndexList = []
+		blobIdSQLStr = self.reGenBlob2OSSQL(self.blobIdSQL, blobNameColumn, t = 'SQL1')
+		blobSQLStr = self.reGenBlob2OSSQL(self.blobSQL, blobNameColumn, t = 'SQL2')
+		self.runTask('Blob2IO', processes, 
+		             self.sourceDBConnStr,
+		             blobIdSQLStr,
+		             blobSQLStr,
+		             filePath,
+		             self.blobNameColumnIndexList, 
+		             blobNameSpliter)
+		
+	
+	def runBlob2DB(self, mapColumnList, processes = 6):
+		self.columnPositionList = []
+		sourceTableColumn = []
+		targetTableColumn = []
+		for cm in mapColumnList:
+			sColumn, tColumn = cm
+			targetTableColumn.append(tColumn)
+			sourceTableColumn.append(sColumn)
 
-        if self.parent.io_method.get() in ('odata', 'iodata'):
-            if not self.parent.rowspliter_str.get() or not self.parent.colspliter_str.get():
-                return self.displaylog('请填写所有选项！！')
+		blobIdSQL = self.reAssembleSQL(self.blobIdSQL, sourceTableColumn, t = 'SQL1')
+		blobSQL = self.reAssembleSQL(self.blobSQL, sourceTableColumn, t = 'SQL2')
+		
+		blobInsertSQL = "insert /*+append*/ into " \
+		    + self.targetTable + "("+ ','.join(targetTableColumn) +") values "
+		
+		print(self.columnPositionList)
+		self.runTask('Blob2DB', processes,
+		             self.sourceDBConnStr,
+		             self.targetDBConnStr,
+		             blobIdSQL,
+		             blobSQL,
+		             blobInsertSQL,
+		             self.columnPositionList)
+		
+	
+	def reGenBlob2OSSQL(self, sqlStr, blobNameColumn, t = 'SQL1'):
+		sqlStr1, sqlStr2 = re.split('from', sqlStr, flags= re.I)
+		columnList = re.sub('select', '', sqlStr1, count = 1, flags = re.I).strip(' ').split(',')
+		sqlStr1 = None
+		
+		for c in columnList:
+			column1 = re.split(' |as', c, flags = re.I)[-1]
+			if t == 'SQL1':
+				column1 = 'SQL1.' + column1
+			else:
+				column1 = 'SQL2.' + column1
+				
+			if blobNameColumn.count(column1) > 0:
+				ind = blobNameColumn.index(column1)
+				self.blobNameColumnIndexList.append(ind)
+			else:
+				self.blobNameColumnIndexList.append(-1)
+		
+			column2 = c.strip(' ').upper()
+			if column2.endswith('IMAGEID') or column2.endswith('IMAGE'):
+				sqlStr1 = 'select ' + c + ' , '
 
-            self.rowspliter_str = self.parent.rowspliter_str.get()
-            self.colspliter_str = self.parent.colspliter_str.get()
+		if not sqlStr1:
+			return
 
-            
-            if self.parent.io_method.get() == 'odata':
-                if not self.parent.sqltext.get('0.0', TK.END):
-                    return self.displaylog('请填写要导出数据的完整SQL语句！！')                  
-                try:
-                    dataexport = DataExport(self, self.dbconn_str, self.parent.sqltext.get('0.0', TK.END), \
-                                            self.colspliter_str, self.rowspliter_str, \
-                                            self.datafile, self.logfile, self.ctlfile)
-                    dataexport.start()
-                    ParaPrase.set('TABLE', 'exportsqlstr', self.parent.sqltext.get('0.0', TK.END))
-                except Exception as e:
-                    return self.displaylog('导出数据异常:', e.args)
-                    
-            else:
-                if not self.parent.table_str.get():
-                    return self.displaylog('请填写要导入的表！！')                  
-                try:
-                    dataimport = DataImport(self, self.dbconn_str, self.parent.table_str.get(), \
-                                            self.rowspliter_str, self.colspliter_str, self.ctlfile, self.logfile)
-                    dataimport.start()
-                    ParaPrase.set('TABLE', 'importtable', self.parent.table_str.get())
-                except Exception as e:
-                    return self.displaylog('导入数据异常:', e.args)
-                
-            ParaPrase.set('DATA', 'rowspliter', self.rowspliter_str)
-            ParaPrase.set('DATA', 'colspliter', self.colspliter_str)              
-
-        else:
-            if not self.parent.piccolumn_str.get() or not self.parent.picnamecolumn_str.get() \
-               or not self.parent.picnamespliter_str.get():
-                return self.displaylog('请填写所有选项！！')
-            self.piccolumn = self.parent.piccolumn_str.get()
-            self.picnamecolumn = self.parent.picnamecolumn_str.get()
-            self.picnamespliter = self.parent.picnamespliter_str.get()
-            
-            if self.parent.io_method.get() == 'ipic':
-                if not self.parent.table_str.get():
-                    return self.displaylog('请填写要导入的表！！')
-                try:
-                    picimport = PicImport(self, self.dbconn_str, self.parent.table_str.get(), \
-                                          self.piccolumn, self.picnamecolumn, self.picnamespliter, self.logfile)
-                    picimport.start()
-                    ParaPrase.set('TABLE', 'importtable', self.parent.table_str.get())
-                except Exception as e:
-                    return self.displaylog('导入图片异常:', e.args)                  
-                
-                
-            else:
-                if not self.parent.sqltext.get('0.0', TK.END):
-                    return self.displaylog('请填写要导出数据的SQL语句，注意只需要FROM以及后面的部分！！')  
-                try:
-                    picexport = PicExport(self, self.dbconn_str, self.parent.sqltext.get('0.0', TK.END), \
-                                          self.piccolumn, self.picnamecolumn, self.picnamespliter, self.logfile)
-                    picexport.start()
-                    ParaPrase.set('TABLE', 'exportsqlstr', self.parent.sqltext.get('0.0', TK.END))
-                except Exception as e:
-                    return self.displaylog('导出图片异常:', e.args)
-                
-            ParaPrase.set('PICTURE', 'piccolumn', self.piccolumn)
-            ParaPrase.set('PICTURE', 'picnamecolumn', self.picnamecolumn)
-            ParaPrase.set('PICTURE', 'picnamespliter', self.picnamespliter)  
-
-                    
-        ParaPrase.set('DATABASE', 'dbconn', self.dbconn_str)
-        ParaPrase.set('DATABASE', 'nls_lang', self.nlslang_str)
-                      
-        
-    def renderpara(self):
-        self.parent.dbconn_entry.delete('0', 'end')
-        self.parent.dbconn_entry.insert('0', ParaPrase.get_other('DATABASE', 'dbconn'))
-        self.parent.rowspliter_entry.delete('0', 'end')
-        self.parent.rowspliter_entry.insert('0', ParaPrase.get_spliter('rowspliter'))
-        self.parent.colspliter_entry.delete('0', 'end')
-        self.parent.colspliter_entry.insert('0', ParaPrase.get_spliter('colspliter'))
-        self.parent.nlslang_entry.delete('0', 'end')
-        self.parent.nlslang_entry.insert('0', ParaPrase.get_other('DATABASE', 'nls_lang'))
-        self.parent.table_entry.delete('0', 'end')
-        self.parent.table_entry.insert('0', ParaPrase.get_other('TABLE', 'importtable'))
-        self.parent.piccolumn_entry.delete('0', 'end')
-        self.parent.piccolumn_entry.insert('0', ParaPrase.get_other('PICTURE', 'piccolumn'))        
-        self.parent.picnamecolumn_entry.delete('0', 'end')
-        self.parent.picnamecolumn_entry.insert('0', ParaPrase.get_other('PICTURE', 'picnamecolumn'))
-        self.parent.picnamespliter_entry.delete('0', 'end')
-        self.parent.picnamespliter_entry.insert('0', ParaPrase.get_other('PICTURE', 'picnamespliter'))          
-        self.parent.sqltext.delete(0.0,TK.END)
-        self.parent.sqltext.insert('0.0', ParaPrase.get_other('TABLE', 'exportsqlstr'))
-        self.parent.iopath_label['text'] = ParaPrase.get_other('FILE', 'iopath')
-        
-
-    def displaylog(self, tips, info=''):
-        if tips and not tips.endswith('\n'):
-            tips += '\n'
-        elif not tips:
-            return
-        
-        if not isinstance(info, list) and not isinstance(info, tuple):            
-            text = tips + '\n'.join(info)
-        elif info:
-            text = tips + info
-        else:
-            text = tips
-            
-        # 如何在insert时控制字体颜色？    
-        self.parent.logtext.insert(TK.END, text)
-            
+		for c in columnList:
+			column3 = c.strip(' ').upper()
+			if column3.endswith('IMAGEID') or column3.endswith('IMAGE'):
+				continue
+			sqlStr1 += c + ' , '
+	
+		sqlStr = sqlStr1.rstrip(', ') + ' from ' + sqlStr2
+		
+		print(sqlStr)
+		
+		return sqlStr
+	
+	
+	def reAssembleSQL(self, sqlStr, sourceTableColumn, t = 'SQL1'):
+		sqlStr1, sqlStr2 = re.split('from', sqlStr, flags= re.I)
+		columnList = re.sub('select', '', sqlStr1, count = 1, flags = re.I).strip(' ').split(',')
+		sqlStr1 = None
+	
+		#对SQL重新构造，把ImageId和Image放在SQL的首位
+		for c in columnList:	
+			column2 = c.strip(' ').upper()
+			if column2.endswith('IMAGEID') or column2.endswith('IMAGE'):
+				sqlStr1 = 'select ' + c + ' , '
+	
+		if not sqlStr1:
+			return
+	
+		for c in columnList:
+			column3 = c.strip(' ').upper()
+			if column3.endswith('IMAGEID') or column3.endswith('IMAGE'):
+				continue
+			sqlStr1 += c + ' , '
+	
+		sqlStr = sqlStr1.rstrip(', ') + ' from ' + sqlStr2
+		
+		print(sqlStr)
+		
+		#生成列在输入时的位置顺序
+		sqlStr1, sqlStr2 = re.split('from', sqlStr, flags= re.I)
+		columnList = re.sub('select', '', sqlStr1, count = 1, flags = re.I).split(',')
+	
+		for c in columnList:
+			column1 = re.split(' |as', c.strip(' '), flags = re.I)[-1]
+			if t == 'SQL1':
+				column1 = 'SQL1.' + column1
+			else:
+				column1 = 'SQL2.' + column1
+	
+			if sourceTableColumn.count(column1) > 0:
+				ind = sourceTableColumn.index(column1)
+				self.columnPositionList.append(ind)
+			else:
+				self.columnPositionList.append(-1)				
+	
+		return sqlStr
+	
+		
+	
+		
+			
+				
+		
+			
+		
+			
+		
+		
+		
+		
+		
+		
+		
+			
+				
+				
+				
+		
+			
